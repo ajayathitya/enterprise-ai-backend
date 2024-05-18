@@ -1,5 +1,6 @@
 import os
 import uuid
+import random
 import logging
 from sys import stdout
 from .templates import *
@@ -204,9 +205,39 @@ async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
                     'conversation_id':conversation_id
                     })
     
-    response = parse_obj_as(ChatResponse, response)
-    
-    resources['chatlog_collection'].insert_one(response.__dict__)
+    try:
+        response = parse_obj_as(ChatResponse, response)
+        resources['chatlog_collection'].insert_one(response.__dict__)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Error during response insert: "+str(e))
+    return response
+
+@app.post("/v1/customerservice-dev/")
+async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
+    response:dict = {
+            'query':chat_request.query,
+            'answer':'The generated answer will appear here',
+            'class_label':'query',
+            'session_id':chat_request.session_id,
+            'conversation_id':chat_request.session_id+'_conv_id',
+            'subclass_label':'product_query',
+            'followup_questions':['New development on Product A.', 'Update contact information.', 'Share more details on credits.'],
+            'context_id':['product_info.docx','training_guide.pptx','transition_guide.pdf'],
+            'search_query':'Search query of '+chat_request.query+'. I really want it in two lines?',
+            'hallucination_flag':0,
+            'total_time':random.randint(100,300)/100,
+            'prompt_tokens':random.randint(1000,2000),
+            'completion_tokens':random.randint(100,200),
+            'total_tokens':random.randint(1100,2200),
+            'total_cost':random.randint(1,10)/1000,
+            'model_name':'gpt-4o',
+            'timestamp': datetime.now(timezone('US/Eastern')).strftime("%Y-%m-%d  %I:%M:%S %p"),
+        }
+
+    try:
+        response = parse_obj_as(ChatResponse, response)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Error during response parsing: "+str(e))
     return response
 
 if __name__ == "__main__":
