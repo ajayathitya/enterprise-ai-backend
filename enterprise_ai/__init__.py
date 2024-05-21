@@ -4,6 +4,7 @@ import json
 import base64
 import random
 import logging
+import pandas as pd
 from sys import stdout
 from .templates import *
 from time import time
@@ -159,7 +160,7 @@ async def default() -> dict:
 async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
 
     if chat_request.query is None or chat_request.query == '' or chat_request.session_id is None:
-        raise HTTPException(status_code=400, detail="Invalid request. Params 'query', and 'session_id' should not be empty.")
+        raise HTTPException(status_code=400, detail="Invalid Request. Params 'query', and 'session_id' should not be Empty.")
     
     conversation_id: str = str(uuid.uuid4())
     config: dict = {"metadata": {"conversation_id": conversation_id}}
@@ -170,7 +171,7 @@ async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
             response:dict = resources['classifcation_chain'].invoke({"query":chat_request.query},config=config)
 
         except Exception as e:
-            raise HTTPException(status_code=500, detail="Error during query classification: "+str(e))
+            raise HTTPException(status_code=500, detail=f"Unable to Classify Query: {str(e)}")
 
         if response['class_label'] == "query" and response['subclass_label'] != "greetings":
             try:
@@ -180,7 +181,7 @@ async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
                                                                     },config=config)
                 
             except Exception as e:
-                raise HTTPException(status_code=500, detail="Error during response generation: "+str(e))
+                raise HTTPException(status_code=500, detail=f"Unable to Generate Response: {str(e)}")
             response.update(query_response)
 
         elif response['subclass_label'] == 'greetings':
@@ -215,7 +216,7 @@ async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
         response = parse_obj_as(ChatResponse, response)
         resources['chatlog_collection'].insert_one(response.__dict__)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during response insert: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unable to Insert Response: {str(e)}")
     return response
 
 @app.post("/v1/customerservice-dev/")
@@ -243,8 +244,34 @@ async def chat_completion_dev(chat_request: ChatRequest) -> ChatResponse:
     try:
         response = parse_obj_as(ChatResponse, response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error during response parsing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unable to Parse Resposne: {str(e)}")
     return response
+
+@app.get("/v1/analytics")
+async def get_analytics() -> dict:
+    chatlog = resources["chatlog_collection"]
+    try:
+        start = time()
+        response = {
+                        'total_cost': round(list(chatlog.aggregate([{"$group": {"_id": None,"total_cost_sum": {"$sum": "$total_cost"}}}]))[0]['total_cost_sum'],3),
+                        'total_requests': chatlog.count_documents({}),
+                        'average_tokens_per_question': round(list(chatlog.aggregate([{"$group": {"_id": None,"average_tokens": {"$avg": "$total_tokens"}}}]))[0]['average_tokens']),
+                        'average_response_time': round(list(chatlog.aggregate([{"$group": {"_id": None,"average_response_time": {"$avg": "$total_time"}}}]))[0]['average_response_time'],2),
+                        'customer_questions': json.loads(pd.DataFrame([{'Class': i["_id"]["class_label"].replace('_', ' ').title(), 'Sub-Class': i["_id"]["subclass_label"].replace('_', ' ').title(), 'Count': i["count"]} for i in list(chatlog.aggregate([{"$group": {"_id": {"class_label": "$class_label", "subclass_label": "$subclass_label"}, "count": {"$sum": 1}}}]))]).to_json(orient='records')),
+                        'tickets_orders': json.loads(pd.DataFrame([(key, value) for key, value in (list(chatlog.aggregate([{"$group": {"_id": None, "Ticket Queries": {"$sum": {"$cond": {"if": {"$eq": ["$class_label", "complaint"]}, "then": 1, "else": 0}}}, "Order Queries": {"$sum": {"$cond": {"if": {"$eq": ["$class_label", "order"]}, "then": 1, "else": 0}}}}}]))[0]).items() if key!='_id'],columns=['Category', 'Count']).to_json(orient='records')),
+                        'periodic_traffic': json.loads(pd.DataFrame(list(chatlog.aggregate([{"$group": {"_id": "$timestamp", "Count": {"$sum": 1}}}, {"$sort": {"_id": 1}}]))).assign(Date=lambda df: pd.to_datetime(df['_id'], format='%Y-%m-%d %H:%M:%S %p', errors='coerce').dt.strftime('%Y-%m-%d')).groupby('Date', as_index=False)['Count'].sum().to_json(orient='records')),
+                        'hourly_traffic': json.loads((pd.DataFrame(list(chatlog.aggregate([{"$project": {"hour": {"$substr": ["$timestamp", 11, 2]}}}, {"$group": {"_id": "$hour", "count": {"$sum": 1}}}, {"$sort": {"_id": 1}},{"$project": {"Hour": "$_id", "Count": "$count", "_id": 0}}]))).merge(pd.DataFrame({'Hour': [str(i).zfill(2) for i in range(24)]}), on='Hour', how='outer').fillna(0).astype({'Count': int})).assign(Hour=lambda df: pd.to_datetime(df['Hour'], format='%H').dt.strftime('%I %p')).to_json(orient='records')),
+                        'hallucination_check': json.loads((pd.DataFrame(list(chatlog.aggregate([{"$group": {"_id": "$hallucination_flag", "count": {"$sum": 1}}},{"$project": {"Status": "$_id", "Count": "$count", "_id": 0}}]))).assign(Status=lambda x: x['Status'].map({'0': 'False', '1': 'True', None:'Not Invoked'}))).to_json(orient='records')),
+                        'top_n_docs': json.loads(pd.DataFrame(sorted(list(chatlog.aggregate([{"$unwind": "$context_id"}, {"$group": {"_id": "$context_id", "Count": {"$sum": 1}}}, {"$project": {"_id": 0, "Document": "$_id", "Count": 1}}])),key=lambda d: d['Count'],reverse=True)[:10],columns=['Document','Count']).to_json(orient='records')),
+                        'mean_response_time': json.loads(pd.DataFrame(list(chatlog.aggregate([{"$group": {"_id": "$class_label", "average_total_time": {"$avg": "$total_time"}}}, {"$project": {"_id": 0, "Category": "$_id", "Mean Response Time (in secs)": {"$round": ["$average_total_time", 2]}}}, {"$sort": {"average_total_time": 1}}])),columns=['Category','Mean Response Time (in secs)']).to_json(orient='records')),
+                        'questions_per_dollar': json.loads(pd.DataFrame(list(chatlog.aggregate([{"$group": {"_id": "$class_label", "average_total_cost": {"$avg": "$total_cost"}}}, {"$project": {"_id": 0, "Category": "$_id", "average_total_cost": 1, "Mean Queries / $1": {"$toInt": {"$round": [{"$divide": [1, "$average_total_cost"]}]}}}}, {"$sort": {"average_total_cost": 1}}])), columns=['Category', 'Mean Queries / $1']).to_json(orient='records')),
+                        'timestamp': datetime.now(timezone('US/Eastern')).strftime("%Y-%m-%d  %I:%M:%S %p")
+                    }
+        end = time()
+        response.update({'total_time':round(end-start,2)})
+        return response
+    except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Unable to Fetch Stats: {str(e)}")
 
 @app.post("/v1/ocr/")
 async def invoice_OCR(invoice: UploadFile) -> OcrResponse:
@@ -278,7 +305,7 @@ async def invoice_OCR(invoice: UploadFile) -> OcrResponse:
             response = parse_obj_as(OcrResponse, response)
             resources['ocr_collection'].insert_one(response.__dict__)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error during response insert: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Unable to Insert Response: {str(e)}")
         return response
     
     except Exception as e:
