@@ -46,3 +46,18 @@ class OcrResponse(BaseModel):
     total_cost: float = Field(description="Total cost of processing the invoice",gt=0.0)
     model_name: str = Field(description="Name and version of the LLM used")
     timestamp: str = Field(description="Timestamp at which the response is sent back") 
+
+class AnalyticsResponse(BaseModel):
+    total_cost: float = Field(description="Total cost of requests",ge=0.0)
+    total_requests: int = Field(description="Total number of requests processed",ge=0)
+    average_tokens_per_question: float = Field(description="Average number of tokens per question")
+    average_response_time: float = Field(description="Average response time in seconds")
+    customer_questions: list[dict] = Field(description="Customer questions categorized by class and sub-class")
+    tickets_orders: list[dict] = Field(description="Ticket and order queries")
+    periodic_traffic: list[dict] = Field(description="Traffic data aggregated by date")
+    hourly_traffic: list[dict] = Field(description="Traffic data aggregated by hour")
+    hallucination_check: list[dict] = Field(description="Status of hallucination checks")
+    top_n_docs: list[dict] = Field(description="Top N documents based on context ID")
+    mean_response_time: list[dict] = Field(description="Mean response time categorized by class label")
+    questions_per_dollar: list[dict] = Field(description="Number of questions per dollar, categorized by class label")
+    timestamp: str = Field(description="Timestamp of the analytics response")

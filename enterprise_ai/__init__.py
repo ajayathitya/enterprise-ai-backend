@@ -22,7 +22,7 @@ from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_community.callbacks import get_openai_callback
 from .product_config import product_config
 from .utils import calculate_tokens
-from .objects import ChatRequest, ChatResponse, OcrResponse
+from .objects import ChatRequest, ChatResponse, OcrResponse, AnalyticsResponse
 from langchain.schema import Document
 from langchain.schema import SystemMessage,HumanMessage
 from contextlib import asynccontextmanager
@@ -159,7 +159,7 @@ async def default() -> dict:
 @app.post("/v1/customerservice/")
 async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
 
-    if chat_request.query is None or chat_request.query == '' or chat_request.session_id is None:
+    if chat_request.query is None or chat_request.query.strip() == '' or chat_request.session_id is None:
         raise HTTPException(status_code=400, detail="Invalid Request. Params 'query', and 'session_id' should not be Empty.")
     
     conversation_id: str = str(uuid.uuid4())
@@ -248,7 +248,7 @@ async def chat_completion_dev(chat_request: ChatRequest) -> ChatResponse:
     return response
 
 @app.get("/v1/analytics")
-async def get_analytics() -> dict:
+async def get_analytics() -> AnalyticsResponse:
     chatlog = resources["chatlog_collection"]
     try:
         start = time()
@@ -269,9 +269,14 @@ async def get_analytics() -> dict:
                     }
         end = time()
         response.update({'total_time':round(end-start,2)})
-        return response
     except Exception as e:
             raise HTTPException(status_code=500, detail=f"Unable to Fetch Stats: {str(e)}")
+    
+    try:
+        response = parse_obj_as(AnalyticsResponse, response)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unable to Parse Stats Resposne: {str(e)}")
 
 @app.post("/v1/ocr/")
 async def invoice_OCR(invoice: UploadFile) -> OcrResponse:
