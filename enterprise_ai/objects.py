@@ -1,6 +1,5 @@
 from typing import Optional
 from langchain_core.pydantic_v1 import BaseModel, Field
-
 class ClassificationLabels(BaseModel):
     class_label:str = Field(description='The class label of the user query')
     subclass_label: str = Field(description='The subclass label of the user query')
@@ -36,3 +35,14 @@ class ChatResponse(BaseModel):
     timestamp: str = Field(description="Timestamp at which the answer is sent back")    
     memory: Optional[list[tuple]] = Field(description="Last 3 conversation pairs")
     context: Optional[str] = Field(description="Concatenated context for debug")
+
+class OcrResponse(BaseModel):
+    filename: str = Field(description="Original filename from request")
+    parsed_content:dict = Field(description="Parsed JSON content from invoice")
+    total_time: float = Field(description="Total time taken to process the query",gt=0)
+    prompt_tokens: int = Field(description="Input token length",gt=0)
+    completion_tokens: int = Field(description="Output token length",gt=0)
+    total_tokens: int = Field(description="Input + output tokens",gt=0)
+    total_cost: float = Field(description="Total cost of processing the invoice",gt=0.0)
+    model_name: str = Field(description="Name and version of the LLM used")
+    timestamp: str = Field(description="Timestamp at which the response is sent back") 

@@ -1,5 +1,7 @@
 import os
 import uuid
+import json
+import base64
 import random
 import logging
 from sys import stdout
@@ -10,23 +12,21 @@ from pytz import timezone
 from dotenv import load_dotenv
 from operator import itemgetter
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile
 from pymongo import MongoClient
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores.azure_cosmos_db import AzureCosmosDBVectorSearch
 from langchain_core.pydantic_v1 import parse_obj_as
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_community.callbacks import get_openai_callback
 from .product_config import product_config
 from .utils import calculate_tokens
-from .objects import ChatRequest, ChatResponse
+from .objects import ChatRequest, ChatResponse, OcrResponse
 from langchain.schema import Document
+from langchain.schema import SystemMessage,HumanMessage
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
 from fastapi.exceptions import HTTPException
-from langsmith import traceable
-from langchain_core.outputs import LLMResult
 
 load_dotenv()
 
@@ -38,9 +38,9 @@ async def lifespan(app: FastAPI):
     logging.info('****************SYSTEM STARTUP****************')
 
     client = MongoClient(os.getenv('COSMOSDB_CONNECTION_STRING'))
-    database = client['customerservicegpt']
-    resources['chatlog_collection'] = database['chatlog']
-
+    resources['chatlog_collection'] = client['customerservicegpt']['chatlog']
+    resources['ocr_collection'] = client['invoicereviewgpt']['parsed_invoices']
+    resources['vision_model'] = ChatOpenAI(model='gpt-4o',temperature=0.001,model_kwargs={"response_format":{"type":"json_object"}})
     resources['model'] = AzureChatOpenAI(
                                             api_key=os.environ["AZURE_OPENAI_API_KEY_SC"], 
                                             azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT_SC"], 
@@ -115,8 +115,14 @@ def get_cost(prompt_tokens:int, completion_tokens:int) -> float:
     if resources['model'].deployment_name.startswith('gpt-3'):
         return round(((prompt_tokens/1000)*0.0005)+((completion_tokens/1000)*0.0015),5)
 
+def get_vision_cost(prompt_tokens:int, completion_tokens:int) -> float:
+    return round(((prompt_tokens/1000)*0.005)+((completion_tokens/1000)*0.015),5)
+
 def get_model_name() -> str:
     return resources['model'].deployment_name.replace('-dev','')
+
+def get_vision_model_name() -> str:
+    return "gpt-4o"
 
 def get_memory(session_id:str='test-session')->dict:
     memory_list = resources['chatlog_collection'].find({"session_id": session_id, "class_label": "query"}, {"query": 1, "answer": 1, "_id": 0}).sort([("timestamp", -1)]).limit(3)
@@ -153,7 +159,7 @@ async def default() -> dict:
 async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
 
     if chat_request.query is None or chat_request.query == '' or chat_request.session_id is None:
-        raise HTTPException(status_code=400, detail="query and session_id should not be empty")
+        raise HTTPException(status_code=400, detail="Invalid request. Params 'query', and 'session_id' should not be empty.")
     
     conversation_id: str = str(uuid.uuid4())
     config: dict = {"metadata": {"conversation_id": conversation_id}}
@@ -209,11 +215,11 @@ async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
         response = parse_obj_as(ChatResponse, response)
         resources['chatlog_collection'].insert_one(response.__dict__)
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error during response insert: "+str(e))
+        raise HTTPException(status_code=500, detail=f"Error during response insert: {str(e)}")
     return response
 
 @app.post("/v1/customerservice-dev/")
-async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
+async def chat_completion_dev(chat_request: ChatRequest) -> ChatResponse:
     response:dict = {
             'query':chat_request.query,
             'answer':'The generated answer will appear here',
@@ -237,8 +243,46 @@ async def chat_completion(chat_request: ChatRequest) -> ChatResponse:
     try:
         response = parse_obj_as(ChatResponse, response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error during response parsing: "+str(e))
+        raise HTTPException(status_code=500, detail=f"Error during response parsing: {str(e)}")
     return response
+
+@app.post("/v1/ocr/")
+async def invoice_OCR(invoice: UploadFile) -> OcrResponse:
+    if invoice is None or (invoice.content_type!='image/jpeg' and invoice.content_type!='image/png'):
+        raise HTTPException(status_code=400, detail="Invalid file format. Only JPEG and PNG files are allowed.")
+    try:
+        encoded_image: bytes = base64.b64encode(invoice.file.read()).decode('utf-8')
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during file encoding: {str(e)}")
+    
+    try:
+        start: time = time()
+        with get_openai_callback() as cb:
+            response = resources['vision_model'].invoke([SystemMessage(content=[{"type":"text","text":"Convert all the elements in invoice to JSON. Return JSON only."}]),
+                                                     HumanMessage(content=[{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{encoded_image}",}}])])
+            response = response.dict()
+            end = time()
+            print(type(response))
+        response.update({
+                        'filename':invoice.filename,
+                        'parsed_content':json.loads(response['content']),
+                        'total_time':round(end-start,2),
+                        'prompt_tokens':cb.prompt_tokens,
+                        'completion_tokens':cb.completion_tokens,
+                        'total_tokens': cb.total_tokens,
+                        'total_cost': get_vision_cost(prompt_tokens=cb.prompt_tokens, completion_tokens=cb.completion_tokens),
+                        'model_name':get_vision_model_name(),
+                        'timestamp':datetime.now(timezone('US/Eastern')).strftime("%Y-%m-%d %H:%M:%S %p"),
+                        })
+        try:
+            response = parse_obj_as(OcrResponse, response)
+            resources['ocr_collection'].insert_one(response.__dict__)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error during response insert: {str(e)}")
+        return response
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during API request: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
