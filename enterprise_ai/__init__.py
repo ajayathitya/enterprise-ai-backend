@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     logging.info('****************SYSTEM STARTUP****************')
 
     client = MongoClient(os.getenv('COSMOSDB_CONNECTION_STRING'))
-    resources['chatlog_collection'] = client['customerservicegpt']['chatlog']
+    resources['chatlog_collection'] = client['customerservicegpt_kf']['chatlog']
     resources['ocr_collection'] = client['invoicereviewgpt']['parsed_invoices']
     resources['vision_model'] = ChatOpenAI(model='gpt-4o',temperature=0.001,model_kwargs={"response_format":{"type":"json_object"}})
     resources['model'] = AzureChatOpenAI(
@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
     
     vectorstore = vectorstore = AzureCosmosDBVectorSearch.from_connection_string(
                                             connection_string = os.getenv('COSMOSDB_CONNECTION_STRING'),
-                                            namespace="customerservicegpt.knowledge",
+                                            namespace="customerservicegpt_kf.knowledge",
                                             embedding=resources['embeddings_model']
                                         )
     resources['retriever'] = vectorstore.as_retriever(search_kwargs={'k': 3})
